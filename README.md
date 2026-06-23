@@ -3,9 +3,9 @@
 A small, dependency-free C++17 library for moving files and directories to the
 operating system's trash / recycle bin instead of permanently deleting them.
 
-- **Linux / *BSD** implements the [FreeDesktop.org Trash specification v1.0](https://specifications.freedesktop.org/trash-spec/trashspec-1.0.html) directly (no glib, Qt, or GTK).
-- **Windows** uses `IFileOperation` with `FOFX_RECYCLEONDELETE`.
-- **macOS** uses `-[NSFileManager trashItemAtURL:resultingItemURL:error:]`.
+- Linux & BSD: implements the [FreeDesktop.org Trash specification v1.0](https://specifications.freedesktop.org/trash-spec/trashspec-1.0.html) directly (no glib, Qt, or GTK).
+- Windows: uses `IFileOperation` with `FOFX_RECYCLEONDELETE`.
+- macOS: uses `-[NSFileManager trashItemAtURL:resultingItemURL:error:]`.
 
 No third-party runtime dependencies; only the platform SDK.
 
