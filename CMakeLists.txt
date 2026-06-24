@@ -3,11 +3,20 @@ project(librecycle VERSION 0.1.0 LANGUAGES CXX)
 
 option(LIBRECYCLE_BUILD_TESTS "Build librecycle tests" ON)
 
+# Default to a static library so librecycle embeds cleanly into host projects
+# (e.g. via add_subdirectory) regardless of the host's BUILD_SHARED_LIBS value.
+# Standalone users can still request a shared library explicitly.
+option(LIBRECYCLE_SHARED "Build librecycle as a shared library" OFF)
+
 if(APPLE)
   enable_language(OBJCXX)
 endif()
 
-add_library(recycle)
+if(LIBRECYCLE_SHARED)
+  add_library(recycle SHARED)
+else()
+  add_library(recycle STATIC)
+endif()
 add_library(librecycle::recycle ALIAS recycle)
 
 target_sources(recycle PRIVATE src/trash.cpp)
