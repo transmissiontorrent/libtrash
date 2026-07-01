@@ -1,4 +1,4 @@
-# librecycle
+# libtrash
 
 A small, dependency-free C++17 library for moving files and directories to the
 operating system's trash / recycle bin instead of permanently deleting them.
@@ -15,22 +15,22 @@ The public surface is a single function with two overloads that mirror
 `<filesystem>` error-handling conventions:
 
 ```cpp
-#include <librecycle/recycle.hpp>
+#include <libtrash/trash.hpp>
 
 // Non-throwing: returns false and sets `ec` on failure.
 std::error_code ec;
-if (!librecycle::recycle("/path/to/file or dir", ec))
+if (!libtrash::trash("/path/to/file or dir", ec))
 {
-    if (ec == librecycle::errc::not_found) { /* ... */ }
+    if (ec == libtrash::errc::not_found) { /* ... */ }
     std::fprintf(stderr, "%s\n", ec.message().c_str());
 }
 
 // Throwing: throws std::filesystem::filesystem_error on failure.
-librecycle::recycle("/path/to/file");
+libtrash::trash("/path/to/file");
 ```
 
-Paths are UTF-8. Failure reasons are reported via the `librecycle::errc` enum,
-which integrates with `std::error_code` (`librecycle::error_category()`).
+Paths are UTF-8. Failure reasons are reported via the `libtrash::errc` enum,
+which integrates with `std::error_code` (`libtrash::error_category()`).
 
 ## Build
 
@@ -43,8 +43,8 @@ ctest --test-dir build --output-on-failure
 ## Use as a submodule
 
 ```cmake
-add_subdirectory(third-party/librecycle)   # tests/example are skipped automatically
-target_link_libraries(your_app PRIVATE librecycle::recycle)
+add_subdirectory(third-party/libtrash)   # tests/example are skipped automatically
+target_link_libraries(your_app PRIVATE libtrash::trash)
 ```
 
 On macOS the Foundation framework is linked automatically; on Windows `ole32`

@@ -2,9 +2,9 @@
 // This file Copyright © Mnemosaic LLC.
 //
 // Minimal CLI: move each argument to the trash.
-//   recycle_example <path> [<path> ...]
+//   trash_example <path> [<path> ...]
 
-#include "librecycle/recycle.hpp"
+#include "libtrash/trash.hpp"
 
 #include <cstdio>
 #include <system_error>
@@ -21,7 +21,7 @@ int main(int argc, char** argv)
     for (int i = 1; i < argc; ++i)
     {
         std::error_code ec;
-        if (librecycle::recycle(argv[i], ec))
+        if (libtrash::trash(argv[i], ec))
         {
             std::printf("trashed: %s\n", argv[i]);
         }
