@@ -2,14 +2,14 @@
 // This file Copyright © Mnemosaic LLC.
 //
 // Platform-agnostic pieces: the trash error_category, the make_error_code
-// customization point, and the throwing recycle() overload.
+// customization point, and the throwing trash() overload.
 
-#include "librecycle/recycle.hpp"
+#include "libtrash/trash.hpp"
 
 #include <filesystem>
 #include <string>
 
-namespace librecycle
+namespace libtrash
 {
 namespace
 {
@@ -56,13 +56,13 @@ std::error_code make_error_code(errc e) noexcept
     return { static_cast<int>(e), error_category() };
 }
 
-void recycle(std::string_view utf8_path)
+void trash(std::string_view utf8_path)
 {
     std::error_code ec;
-    if (!recycle(utf8_path, ec))
+    if (!trash(utf8_path, ec))
     {
-        throw std::filesystem::filesystem_error("librecycle::recycle", std::filesystem::path(utf8_path), ec);
+        throw std::filesystem::filesystem_error("libtrash::trash", std::filesystem::path(utf8_path), ec);
     }
 }
 
-} // namespace librecycle
+} // namespace libtrash

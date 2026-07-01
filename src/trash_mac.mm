@@ -6,7 +6,7 @@
 // NOTE: not compiled or exercised on the development host (Linux); reviewed
 // against the Foundation API docs.
 
-#include "librecycle/recycle.hpp"
+#include "libtrash/trash.hpp"
 
 #if defined(__APPLE__)
 
@@ -15,10 +15,10 @@
 #include <string_view>
 #include <system_error>
 
-namespace librecycle
+namespace libtrash
 {
 
-bool recycle(std::string_view path, std::error_code& ec) noexcept
+bool trash(std::string_view path, std::error_code& ec) noexcept
 {
     ec.clear();
     if (path.empty() || path.find('\0') != std::string_view::npos)
@@ -67,6 +67,6 @@ bool recycle(std::string_view path, std::error_code& ec) noexcept
     }
 }
 
-} // namespace librecycle
+} // namespace libtrash
 
 #endif // __APPLE__

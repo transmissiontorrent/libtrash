@@ -22,6 +22,6 @@ jobs:
         run: cmake --build build --config Release
 
       # On Linux/macOS the tests are hermetic. On Windows the smoke test touches
-      # the real recycle bin, which is acceptable on an ephemeral CI runner.
+      # the real trash, which is acceptable on an ephemeral CI runner.
       - name: Test
         run: ctest --test-dir build --build-config Release --output-on-failure

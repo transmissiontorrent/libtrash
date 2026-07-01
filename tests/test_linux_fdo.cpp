@@ -7,7 +7,7 @@
 // real desktop trash: we redirect HOME and XDG_DATA_HOME at a temp sandbox and
 // inspect Trash/files and Trash/info directly.
 
-#include "librecycle/recycle.hpp"
+#include "libtrash/trash.hpp"
 
 #include <cstdio>
 #include <cstdlib>
@@ -61,7 +61,7 @@ std::size_t count_entries(fs::path const& dir)
 
 int main()
 {
-    fs::path const sandbox = fs::temp_directory_path() / ("librecycle_test_" + std::to_string(::getpid()));
+    fs::path const sandbox = fs::temp_directory_path() / ("libtrash_test_" + std::to_string(::getpid()));
     fs::remove_all(sandbox);
     fs::create_directories(sandbox);
 
@@ -79,8 +79,8 @@ int main()
         std::ofstream(victim) << "data";
     }
     std::error_code ec1;
-    bool const ok1 = librecycle::recycle(victim.string(), ec1);
-    CHECK(ok1 && !ec1, "recycle returns success");
+    bool const ok1 = libtrash::trash(victim.string(), ec1);
+    CHECK(ok1 && !ec1, "trash returns success");
     CHECK(!fs::exists(victim), "original file is gone");
     CHECK(fs::exists(files_dir / "hello world.txt"), "file moved into Trash/files");
 
@@ -97,7 +97,7 @@ int main()
         std::ofstream(victim) << "data2";
     }
     std::error_code ec2;
-    bool const ok2 = librecycle::recycle(victim.string(), ec2);
+    bool const ok2 = libtrash::trash(victim.string(), ec2);
     CHECK(ok2 && !ec2, "second trash of same name returns success");
     CHECK(count_entries(files_dir) == 2, "two distinct entries after collision");
     CHECK(count_entries(info_dir) == 2, "two distinct .trashinfo files after collision");
@@ -109,28 +109,28 @@ int main()
         std::ofstream(dir_victim / "nested" / "f.txt") << "x";
     }
     std::error_code ec3;
-    bool const ok3 = librecycle::recycle(dir_victim.string(), ec3);
+    bool const ok3 = libtrash::trash(dir_victim.string(), ec3);
     CHECK(ok3 && !ec3, "directory trashing returns success");
     CHECK(!fs::exists(dir_victim), "original directory is gone");
     CHECK(fs::exists(files_dir / "subdir" / "nested" / "f.txt"), "directory contents preserved in trash");
 
     // 4) Error paths and std::error_code interop.
     std::error_code ec4;
-    bool const ok4 = librecycle::recycle((sandbox / "does-not-exist").string(), ec4);
-    CHECK(!ok4 && ec4 == librecycle::errc::not_found, "missing path -> errc::not_found");
-    CHECK(ec4.category() == librecycle::error_category(), "error uses librecycle category");
+    bool const ok4 = libtrash::trash((sandbox / "does-not-exist").string(), ec4);
+    CHECK(!ok4 && ec4 == libtrash::errc::not_found, "missing path -> errc::not_found");
+    CHECK(ec4.category() == libtrash::error_category(), "error uses libtrash category");
     CHECK(!ec4.message().empty(), "error has a message");
 
     std::error_code ec5;
     CHECK(
-        !librecycle::recycle("", ec5) && ec5 == librecycle::errc::invalid_argument,
+        !libtrash::trash("", ec5) && ec5 == libtrash::errc::invalid_argument,
         "empty path -> errc::invalid_argument");
 
     // 5) Throwing overload throws on failure, succeeds silently otherwise.
     bool threw = false;
     try
     {
-        librecycle::recycle((sandbox / "also-missing").string());
+        libtrash::trash((sandbox / "also-missing").string());
     }
     catch (fs::filesystem_error const&)
     {

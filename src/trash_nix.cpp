@@ -7,7 +7,7 @@
 // Correctness reference: arsenetar/send2trash (plat_other.py) and
 // andreafrancia/trash-cli.
 
-#include "librecycle/recycle.hpp"
+#include "libtrash/trash.hpp"
 
 #if defined(__linux__) || defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__)
 
@@ -28,7 +28,7 @@
 
 namespace fs = std::filesystem;
 
-namespace librecycle
+namespace libtrash
 {
 namespace
 {
@@ -263,7 +263,7 @@ bool write_trashinfo(std::string const& info_path, std::string const& encoded_pa
 
 } // namespace
 
-bool recycle(std::string_view path_sv, std::error_code& ec) noexcept
+bool trash(std::string_view path_sv, std::error_code& ec) noexcept
 {
     ec.clear();
     try
@@ -396,6 +396,6 @@ bool recycle(std::string_view path_sv, std::error_code& ec) noexcept
     }
 }
 
-} // namespace librecycle
+} // namespace libtrash
 
 #endif // platform
