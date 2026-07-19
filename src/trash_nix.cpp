@@ -11,7 +11,9 @@
 
 #if defined(__linux__) || defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__)
 
-#include <cctype>
+#include "trash_detail.hpp"
+#include "trash_nix_detail.hpp"
+
 #include <cerrno>
 #include <cstdlib>
 #include <ctime>
@@ -39,9 +41,16 @@ std::string get_home()
     {
         return h;
     }
-    if (passwd const* pw = getpwuid(getuid()); pw != nullptr && pw->pw_dir != nullptr)
+    // getpwuid_r is the reentrant form; getpwuid() returns a pointer into a
+    // shared static buffer that another thread could overwrite mid-use.
+    long want = ::sysconf(_SC_GETPW_R_SIZE_MAX);
+    std::string buf(want > 0 ? static_cast<std::size_t>(want) : std::size_t{ 16384 }, '\0');
+    passwd pw = {};
+    passwd* result = nullptr;
+    if (::getpwuid_r(::getuid(), &pw, buf.data(), buf.size(), &result) == 0 && result != nullptr
+        && result->pw_dir != nullptr)
     {
-        return pw->pw_dir;
+        return result->pw_dir;
     }
     return {};
 }
@@ -154,8 +163,11 @@ bool is_safe_admin_trash(std::string const& path)
 bool is_unreserved(unsigned char c)
 {
     // Matches Python's urllib.parse.quote default never-quote set, which
-    // send2trash uses with safe='/': ALWAYS_SAFE + '/'.
-    return (std::isalnum(c) != 0) || c == '_' || c == '.' || c == '-' || c == '~';
+    // send2trash uses with safe='/': ALWAYS_SAFE + '/'. Uses a fixed ASCII test
+    // rather than std::isalnum so encoding never depends on the process locale
+    // (under a single-byte locale isalnum() would leave UTF-8 high bytes raw).
+    bool const alnum = (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
+    return alnum || c == '_' || c == '.' || c == '-' || c == '~';
 }
 
 std::string percent_encode(std::string_view s)
@@ -183,7 +195,10 @@ std::string deletion_date_now()
 {
     std::time_t const t = std::time(nullptr);
     struct tm tm = {};
-    ::localtime_r(&t, &tm);
+    if (::localtime_r(&t, &tm) == nullptr)
+    {
+        return {}; // record an empty DeletionDate rather than a bogus 0000-00-00 one
+    }
     char buf[32] = {};
     std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S", &tm); // local time, no TZ
     return buf;
@@ -201,44 +216,25 @@ struct TrashName
     std::string info_path;
 };
 
-// Find a name that is free in both files/ and info/, inserting a counter before
-// the extension on collision.
-TrashName pick_unique_name(std::string const& files_dir, std::string const& info_dir, std::string const& base)
+// The Nth collision-candidate name: base, then base_2, base_3, ... with the
+// counter inserted before the extension (foo_2.txt, not foo.txt_2).
+std::string nth_name(std::string const& base, int counter)
 {
-    auto make = [&](std::string const& name) {
-        return TrashName{ files_dir + "/" + name, info_dir + "/" + name + ".trashinfo" };
-    };
-
-    TrashName candidate = make(base);
-    int counter = 1;
-    while (path_exists(candidate.files_path) || path_exists(candidate.info_path))
+    if (counter <= 1)
     {
-        ++counter;
-        std::string name;
-        auto const dot = base.rfind('.');
-        if (dot != std::string::npos && dot != 0)
-        {
-            name = base.substr(0, dot) + "_" + std::to_string(counter) + base.substr(dot);
-        }
-        else
-        {
-            name = base + "_" + std::to_string(counter);
-        }
-        candidate = make(name);
+        return base;
     }
-    return candidate;
+    auto const dot = base.rfind('.');
+    if (dot != std::string::npos && dot != 0)
+    {
+        return base.substr(0, dot) + "_" + std::to_string(counter) + base.substr(dot);
+    }
+    return base + "_" + std::to_string(counter);
 }
 
-// Write info/NAME.trashinfo, claiming the slot atomically with O_EXCL.
-bool write_trashinfo(std::string const& info_path, std::string const& encoded_path, std::string const& date)
+// Write all of `content` to fd, retrying short writes and EINTR.
+bool write_all(int fd, std::string const& content)
 {
-    int const fd = ::open(info_path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0600);
-    if (fd < 0)
-    {
-        return false;
-    }
-
-    std::string const content = "[Trash Info]\nPath=" + encoded_path + "\nDeletionDate=" + date + "\n";
     char const* data = content.data();
     auto remaining = static_cast<ssize_t>(content.size());
     while (remaining > 0)
@@ -250,15 +246,65 @@ bool write_trashinfo(std::string const& info_path, std::string const& encoded_pa
             {
                 continue;
             }
-            ::close(fd);
-            ::unlink(info_path.c_str());
             return false;
         }
         data += w;
         remaining -= w;
     }
-    ::close(fd);
     return true;
+}
+
+// Claim a name free in both files/ and info/, writing info/NAME.trashinfo and
+// claiming the slot atomically with O_EXCL. If a concurrent trasher wins the
+// race for a name (EEXIST), advance the collision counter and retry rather than
+// failing. On success fills `out`; on failure sets ec.
+bool claim_and_write_info(
+    std::string const& files_dir,
+    std::string const& info_dir,
+    std::string const& base,
+    std::string const& encoded_path,
+    std::string const& date,
+    TrashName& out,
+    std::error_code& ec)
+{
+    std::string const content = "[Trash Info]\nPath=" + encoded_path + "\nDeletionDate=" + date + "\n";
+    for (int counter = 1; counter <= 100000; ++counter)
+    {
+        std::string const name = nth_name(base, counter);
+        TrashName const cand{ files_dir + "/" + name, info_dir + "/" + name + ".trashinfo" };
+        if (path_exists(cand.files_path))
+        {
+            continue; // files/ slot already taken
+        }
+        int const fd = ::open(cand.info_path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0600);
+        if (fd < 0)
+        {
+            if (errno == EEXIST)
+            {
+                continue; // lost the race for this name -> try the next counter
+            }
+            ec = make_error_code(
+                (errno == EACCES || errno == EPERM || errno == EROFS) ? errc::permission_denied
+                                                                      : errc::platform_error);
+            return false;
+        }
+        bool const wrote = write_all(fd, content);
+        int const werr = errno;
+        // close() can surface a deferred write-back error (e.g. ENOSPC on NFS).
+        bool const closed = ::close(fd) == 0;
+        if (!wrote || !closed)
+        {
+            ::unlink(cand.info_path.c_str()); // don't leave a truncated .trashinfo
+            ec = make_error_code(
+                (wrote == false && (werr == EACCES || werr == EPERM || werr == EROFS)) ? errc::permission_denied
+                                                                                       : errc::platform_error);
+            return false;
+        }
+        out = cand;
+        return true;
+    }
+    ec = make_error_code(errc::platform_error);
+    return false;
 }
 
 } // namespace
@@ -268,24 +314,12 @@ bool trash(std::string_view path_sv, std::error_code& ec) noexcept
     ec.clear();
     try
     {
-        if (path_sv.empty() || path_sv.find('\0') != std::string_view::npos)
+        fs::path resolved;
+        if (!detail::resolve_input(path_sv, resolved, ec))
         {
-            ec = make_error_code(errc::invalid_argument);
             return false;
         }
-
-        std::error_code fsec;
-        fs::path const abs = fs::absolute(fs::path(std::string(path_sv)), fsec);
-        if (fsec)
-        {
-            ec = make_error_code(errc::platform_error);
-            return false;
-        }
-        std::string abs_path = abs.lexically_normal().string();
-        if (abs_path.size() > 1 && abs_path.back() == '/')
-        {
-            abs_path.pop_back();
-        }
+        std::string const abs_path = resolved.string();
 
         if (!path_exists(abs_path))
         {
@@ -307,15 +341,26 @@ bool trash(std::string_view path_sv, std::error_code& ec) noexcept
         dev_t home_dev = 0;
         bool const have_home_dev = nearest_existing_dev(home_trash, home_dev);
 
-        std::string trash_dir;
-        std::string original_for_info; // absolute (home trash) or relative (topdir trash)
+        std::string files_dir;
+        std::string info_dir;
+        std::string original_for_info; // absolute (home trash) or topdir-relative
 
+        // Prefer the home trash when the item is on the home filesystem. If its
+        // directories cannot be created (e.g. a read-only or over-quota home),
+        // fall back to the top-directory trash on the item's own filesystem.
+        bool ready = false;
         if (have_home_dev && file_dev == home_dev)
         {
-            trash_dir = home_trash;
-            original_for_info = abs_path;
+            files_dir = home_trash + "/files";
+            info_dir = home_trash + "/info";
+            if (ensure_dir(files_dir, 0700) && ensure_dir(info_dir, 0700))
+            {
+                original_for_info = abs_path;
+                ready = true;
+            }
         }
-        else
+
+        if (!ready)
         {
             std::string const topdir = find_mount_point(abs_path);
             if (topdir.empty())
@@ -323,36 +368,39 @@ bool trash(std::string_view path_sv, std::error_code& ec) noexcept
                 ec = make_error_code(errc::cross_device);
                 return false;
             }
-            auto const uid = static_cast<unsigned long>(::getuid());
+            uid_t const uid = ::getuid();
+            std::string const uid_s = std::to_string(static_cast<unsigned long>(uid));
+
+            // Select and create the per-user trash directory, refusing to follow
+            // a symlink or reuse a directory owned by someone else (a co-user's
+            // hijack attempt on a shared mount). Prefer the sticky admin trash
+            // $topdir/.Trash/$uid; otherwise fall back to $topdir/.Trash-$uid.
+            std::string trash_dir;
             std::string const admin = topdir + "/.Trash";
-            if (is_safe_admin_trash(admin))
+            if (is_safe_admin_trash(admin) && detail::make_or_verify_owned_dir(admin + "/" + uid_s, uid))
             {
-                trash_dir = admin + "/" + std::to_string(uid);
+                trash_dir = admin + "/" + uid_s;
+            }
+            else if (detail::make_or_verify_owned_dir(topdir + "/.Trash-" + uid_s, uid))
+            {
+                trash_dir = topdir + "/.Trash-" + uid_s;
             }
             else
             {
-                trash_dir = topdir + "/.Trash-" + std::to_string(uid);
+                ec = make_error_code(errc::permission_denied);
+                return false;
             }
 
-            // Path is recorded relative to the top directory for topdir trashes.
-            std::string rel = abs_path;
-            if (rel.rfind(topdir, 0) == 0)
+            files_dir = trash_dir + "/files";
+            info_dir = trash_dir + "/info";
+            if (!ensure_dir(files_dir, 0700) || !ensure_dir(info_dir, 0700))
             {
-                rel.erase(0, topdir.size());
-                while (!rel.empty() && rel.front() == '/')
-                {
-                    rel.erase(0, 1);
-                }
+                ec = make_error_code(errc::permission_denied);
+                return false;
             }
-            original_for_info = rel;
-        }
 
-        std::string const files_dir = trash_dir + "/files";
-        std::string const info_dir = trash_dir + "/info";
-        if (!ensure_dir(files_dir, 0700) || !ensure_dir(info_dir, 0700))
-        {
-            ec = make_error_code(errc::permission_denied);
-            return false;
+            // For topdir trashes the recorded path is relative to the top directory.
+            original_for_info = fs::path(abs_path).lexically_relative(topdir).string();
         }
 
         std::string base = fs::path(abs_path).filename().string();
@@ -360,11 +408,10 @@ bool trash(std::string_view path_sv, std::error_code& ec) noexcept
         {
             base = "file";
         }
-        TrashName const target = pick_unique_name(files_dir, info_dir, base);
-
-        if (!write_trashinfo(target.info_path, percent_encode(original_for_info), deletion_date_now()))
+        TrashName target;
+        if (!claim_and_write_info(
+                files_dir, info_dir, base, percent_encode(original_for_info), deletion_date_now(), target, ec))
         {
-            ec = make_error_code(errc::permission_denied);
             return false;
         }
 
