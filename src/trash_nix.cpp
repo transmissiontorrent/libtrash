@@ -254,6 +254,16 @@ bool write_all(int fd, std::string const& content)
     return true;
 }
 
+// Map a POSIX errno from a filesystem operation to a libtrash::errc.
+errc errc_from_errno(int e)
+{
+    if (e == EACCES || e == EPERM || e == EROFS)
+    {
+        return errc::permission_denied;
+    }
+    return errc::platform_error;
+}
+
 // Claim a name free in both files/ and info/, writing info/NAME.trashinfo and
 // claiming the slot atomically with O_EXCL. If a concurrent trasher wins the
 // race for a name (EEXIST), advance the collision counter and retry rather than
@@ -283,9 +293,7 @@ bool claim_and_write_info(
             {
                 continue; // lost the race for this name -> try the next counter
             }
-            ec = make_error_code(
-                (errno == EACCES || errno == EPERM || errno == EROFS) ? errc::permission_denied
-                                                                      : errc::platform_error);
+            ec = make_error_code(errc_from_errno(errno));
             return false;
         }
         bool const wrote = write_all(fd, content);
@@ -295,9 +303,7 @@ bool claim_and_write_info(
         if (!wrote || !closed)
         {
             ::unlink(cand.info_path.c_str()); // don't leave a truncated .trashinfo
-            ec = make_error_code(
-                (wrote == false && (werr == EACCES || werr == EPERM || werr == EROFS)) ? errc::permission_denied
-                                                                                       : errc::platform_error);
+            ec = make_error_code(wrote ? errc::platform_error : errc_from_errno(werr));
             return false;
         }
         out = cand;
@@ -321,14 +327,12 @@ bool trash(std::string_view path_sv, std::error_code& ec) noexcept
         }
         std::string const abs_path = resolved.string();
 
-        if (!path_exists(abs_path))
+        dev_t file_dev = 0;
+        if (!lstat_dev(abs_path, file_dev))
         {
             ec = make_error_code(errc::not_found);
             return false;
         }
-
-        dev_t file_dev = 0;
-        (void)lstat_dev(abs_path, file_dev);
 
         std::string home_trash = xdg_data_home();
         if (home_trash.empty())
@@ -375,15 +379,17 @@ bool trash(std::string_view path_sv, std::error_code& ec) noexcept
             // a symlink or reuse a directory owned by someone else (a co-user's
             // hijack attempt on a shared mount). Prefer the sticky admin trash
             // $topdir/.Trash/$uid; otherwise fall back to $topdir/.Trash-$uid.
-            std::string trash_dir;
             std::string const admin = topdir + "/.Trash";
-            if (is_safe_admin_trash(admin) && detail::make_or_verify_owned_dir(admin + "/" + uid_s, uid))
+            std::string const admin_dir = admin + "/" + uid_s;
+            std::string const fallback_dir = topdir + "/.Trash-" + uid_s;
+            std::string trash_dir;
+            if (is_safe_admin_trash(admin) && detail::make_or_verify_owned_dir(admin_dir, uid))
             {
-                trash_dir = admin + "/" + uid_s;
+                trash_dir = admin_dir;
             }
-            else if (detail::make_or_verify_owned_dir(topdir + "/.Trash-" + uid_s, uid))
+            else if (detail::make_or_verify_owned_dir(fallback_dir, uid))
             {
-                trash_dir = topdir + "/.Trash-" + uid_s;
+                trash_dir = fallback_dir;
             }
             else
             {
@@ -400,10 +406,10 @@ bool trash(std::string_view path_sv, std::error_code& ec) noexcept
             }
 
             // For topdir trashes the recorded path is relative to the top directory.
-            original_for_info = fs::path(abs_path).lexically_relative(topdir).string();
+            original_for_info = resolved.lexically_relative(topdir).string();
         }
 
-        std::string base = fs::path(abs_path).filename().string();
+        std::string base = resolved.filename().string();
         if (base.empty())
         {
             base = "file";
@@ -419,18 +425,7 @@ bool trash(std::string_view path_sv, std::error_code& ec) noexcept
         {
             int const e = errno;
             ::unlink(target.info_path.c_str()); // release the claimed slot
-            if (e == EXDEV)
-            {
-                ec = make_error_code(errc::cross_device);
-            }
-            else if (e == EACCES || e == EPERM)
-            {
-                ec = make_error_code(errc::permission_denied);
-            }
-            else
-            {
-                ec = make_error_code(errc::platform_error);
-            }
+            ec = make_error_code(e == EXDEV ? errc::cross_device : errc_from_errno(e));
             return false;
         }
 

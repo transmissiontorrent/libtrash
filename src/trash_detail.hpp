@@ -122,11 +122,16 @@ inline bool resolve_input(std::string_view utf8_path, std::filesystem::path& out
         }
 
         // A trailing separator yields an empty filename; treat "/a/b/" as "/a/b"
-        // so the final component is a real name we can keep un-followed.
-        if (!abs.has_filename() && abs.has_relative_path())
-        {
-            abs = abs.parent_path();
-        }
+        // so the final component is a real name we can keep un-followed. (Applied
+        // again below: lexically_normal can re-introduce a trailing separator.)
+        auto const drop_trailing_sep = [](fs::path p) {
+            if (!p.has_filename() && p.has_relative_path())
+            {
+                p = p.parent_path();
+            }
+            return p;
+        };
+        abs = drop_trailing_sep(abs);
 
         std::error_code fsec;
         fs::path const parent = fs::canonical(abs.parent_path(), fsec);
@@ -142,10 +147,7 @@ inline bool resolve_input(std::string_view utf8_path, std::filesystem::path& out
 
         // lexically_normal leaves a trailing separator when the final component
         // was '.'/'..'; drop it (but keep a bare root path).
-        if (!out.has_filename() && out.has_relative_path())
-        {
-            out = out.parent_path();
-        }
+        out = drop_trailing_sep(out);
 
         ec.clear();
         return true;
