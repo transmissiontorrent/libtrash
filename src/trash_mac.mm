@@ -3,6 +3,9 @@
 //
 // macOS backend: -[NSFileManager trashItemAtURL:resultingItemURL:error:].
 //
+// Compiled with ARC (see CMakeLists.txt); Foundation objects are autoreleased,
+// so there is nothing to release by hand.
+//
 // NOTE: not compiled or exercised on the development host (Linux); reviewed
 // against the Foundation API docs.
 
@@ -10,8 +13,11 @@
 
 #if defined(__APPLE__)
 
+#include "trash_detail.hpp"
+
 #import <Foundation/Foundation.h>
 
+#include <filesystem>
 #include <string_view>
 #include <system_error>
 
@@ -21,17 +27,18 @@ namespace libtrash
 bool trash(std::string_view path, std::error_code& ec) noexcept
 {
     ec.clear();
-    if (path.empty() || path.find('\0') != std::string_view::npos)
+
+    // Validate + resolve to an absolute path using the same rule as every other
+    // backend (relative paths, '.'/'..', UTF-8 validation, symlink handling).
+    std::filesystem::path resolved;
+    if (!detail::resolve_input(path, resolved, ec))
     {
-        ec = make_error_code(errc::invalid_argument);
         return false;
     }
 
     @autoreleasepool
     {
-        NSString* ns_path = [[NSString alloc] initWithBytes:path.data()
-                                                     length:static_cast<NSUInteger>(path.size())
-                                                   encoding:NSUTF8StringEncoding];
+        NSString* ns_path = [NSString stringWithUTF8String:resolved.c_str()];
         if (ns_path == nil)
         {
             ec = make_error_code(errc::invalid_argument);
