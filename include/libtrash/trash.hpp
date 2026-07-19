@@ -41,20 +41,31 @@ std::error_category const& error_category() noexcept;
 // Enables std::error_code{libtrash::errc::...} and ec == errc::... checks.
 std::error_code make_error_code(errc e) noexcept;
 
-// Move a file or directory (and its contents) to the OS trash.
-// `utf8_path` must be UTF-8 encoded. Returns true on success; on failure returns
-// false and sets `ec`.
+// Move a file or directory to the OS trash (recycle bin) instead of deleting it.
 //
-// Trashing is inherently recursive at the OS level (a directory and all of its
-// contents move as a single unit), so there is no separate "trash_all": one
-// trash() handles both files and directories.
+//     std::error_code ec;
+//     if (!libtrash::trash("notes.txt", ec)) { /* inspect ec */ }  // non-throwing
+//     libtrash::trash("notes.txt");                                // throws on failure
 //
-// NOTE: do not change the process working directory concurrently while calling
-// this in a multithreaded application.
+// A directory is trashed together with all of its contents in a single operation
+// (there is no separate "trash_all"). libtrash never permanently deletes: if the
+// item cannot be moved to the trash, the call fails and leaves it in place.
+//
+// Edge cases:
+//   * Paths are UTF-8 on every platform. Empty, containing a NUL, or invalid
+//     UTF-8 -> errc::invalid_argument.
+//   * A relative path is resolved against the current working directory; do not
+//     change the CWD from another thread during the call.
+//   * Symlinks and '.'/'..' in the *directory* part of the path are resolved,
+//     but the final component is not: trashing a symlink moves the link itself,
+//     not its target.
+//
+// Non-throwing: returns true on success; on failure returns false and sets `ec`.
 bool trash(std::string_view utf8_path, std::error_code& ec) noexcept;
 
-// Throwing overload. Throws std::filesystem::filesystem_error on failure, with
-// the offending path and a libtrash::errc error_code attached.
+// Throwing overload: returns normally on success, throws
+// std::filesystem::filesystem_error (carrying the path and a libtrash::errc) on
+// failure.
 void trash(std::string_view utf8_path);
 
 } // namespace libtrash
