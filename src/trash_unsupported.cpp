@@ -11,6 +11,8 @@
 #if !defined(_WIN32) && !defined(__APPLE__) && !defined(__linux__) && !defined(__FreeBSD__) \
     && !defined(__NetBSD__) && !defined(__OpenBSD__)
 
+#include "trash_detail.hpp"
+
 #include <string_view>
 #include <system_error>
 
@@ -20,7 +22,7 @@ namespace libtrash
 bool trash(std::string_view path, std::error_code& ec) noexcept
 {
     ec.clear();
-    if (path.empty() || path.find('\0') != std::string_view::npos)
+    if (path.empty() || path.find('\0') != std::string_view::npos || !detail::is_valid_utf8(path))
     {
         ec = make_error_code(errc::invalid_argument);
         return false;
