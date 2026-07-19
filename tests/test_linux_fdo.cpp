@@ -9,6 +9,8 @@
 
 #include "libtrash/trash.hpp"
 
+#include "../src/trash_nix_detail.hpp"
+
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -17,6 +19,7 @@
 #include <string>
 #include <system_error>
 
+#include <sys/stat.h>
 #include <unistd.h>
 
 namespace fs = std::filesystem;
@@ -44,18 +47,6 @@ std::string read_all(fs::path const& p)
 {
     std::ifstream f(p);
     return std::string(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
-}
-
-std::size_t count_entries(fs::path const& dir)
-{
-    std::size_t n = 0;
-    std::error_code ec;
-    for (auto const& e : fs::directory_iterator(dir, ec))
-    {
-        (void)e;
-        ++n;
-    }
-    return n;
 }
 } // namespace
 
@@ -92,6 +83,21 @@ int main()
     CHECK(info.find("/hello%20world.txt") != std::string::npos, "Path is percent-encoded (space -> %20)");
     CHECK(info.find("\nDeletionDate=") != std::string::npos, ".trashinfo has DeletionDate");
 
+    // 1b) Non-ASCII (UTF-8) name is percent-encoded byte-for-byte, independent
+    //     of the process locale (é == 0xC3 0xA9 -> %C3%A9).
+    fs::path const uni_victim = sandbox / "caf\xC3\xA9.txt";
+    {
+        std::ofstream(uni_victim) << "u";
+    }
+    std::error_code ec_uni;
+    bool const ok_uni = libtrash::trash(uni_victim.string(), ec_uni);
+    CHECK(ok_uni && !ec_uni, "trashing a UTF-8-named file succeeds");
+    CHECK(fs::exists(files_dir / "caf\xC3\xA9.txt"), "UTF-8-named file moved into Trash/files");
+    {
+        std::string const uni_info = read_all(info_dir / "caf\xC3\xA9.txt.trashinfo");
+        CHECK(uni_info.find("caf%C3%A9.txt") != std::string::npos, "Path encodes high bytes as %C3%A9");
+    }
+
     // 2) Collision: trashing a second file of the same name must not clobber.
     {
         std::ofstream(victim) << "data2";
@@ -99,8 +105,12 @@ int main()
     std::error_code ec2;
     bool const ok2 = libtrash::trash(victim.string(), ec2);
     CHECK(ok2 && !ec2, "second trash of same name returns success");
-    CHECK(count_entries(files_dir) == 2, "two distinct entries after collision");
-    CHECK(count_entries(info_dir) == 2, "two distinct .trashinfo files after collision");
+    CHECK(fs::exists(files_dir / "hello world.txt"), "first collision entry still present");
+    CHECK(fs::exists(files_dir / "hello world_2.txt"), "second entry uses name_2.ext form");
+    CHECK(read_all(files_dir / "hello world.txt") == "data", "first entry's contents intact");
+    CHECK(read_all(files_dir / "hello world_2.txt") == "data2", "second entry's contents not clobbered");
+    CHECK(fs::exists(info_dir / "hello world.txt.trashinfo"), "first .trashinfo present");
+    CHECK(fs::exists(info_dir / "hello world_2.txt.trashinfo"), "second .trashinfo present");
 
     // 3) Trashing a directory (whole subtree moves in one rename).
     fs::path const dir_victim = sandbox / "subdir";
@@ -113,6 +123,40 @@ int main()
     CHECK(ok3 && !ec3, "directory trashing returns success");
     CHECK(!fs::exists(dir_victim), "original directory is gone");
     CHECK(fs::exists(files_dir / "subdir" / "nested" / "f.txt"), "directory contents preserved in trash");
+
+    // 3b) Trashing a symlink moves the link itself, not its target.
+    fs::path const link_target = sandbox / "link_target.txt";
+    {
+        std::ofstream(link_target) << "keep me";
+    }
+    fs::path const the_link = sandbox / "the_link";
+    fs::create_symlink(link_target, the_link);
+    std::error_code ec_link;
+    bool const ok_link = libtrash::trash(the_link.string(), ec_link);
+    CHECK(ok_link && !ec_link, "trashing a symlink succeeds");
+    CHECK(!fs::exists(fs::symlink_status(the_link)), "the symlink itself is gone from its original location");
+    CHECK(fs::exists(link_target), "the symlink's target is left untouched");
+    CHECK(
+        fs::is_symlink(fs::symlink_status(files_dir / "the_link")),
+        "the trashed entry is the symlink itself, not a copy of its target");
+
+    // 3c) A ".." after a symlinked directory must resolve THROUGH the symlink to
+    // the real location, not collapse lexically to a different (wrong) file.
+    fs::create_directories(sandbox / "real_sub" / "inner");
+    {
+        std::ofstream(sandbox / "real_sub" / "victim2.txt") << "the real one";
+    }
+    {
+        std::ofstream(sandbox / "victim2.txt") << "decoy - must survive";
+    }
+    fs::create_directory_symlink(sandbox / "real_sub" / "inner", sandbox / "inner_link");
+    std::error_code ec_dd;
+    // "inner_link/../victim2.txt" == real_sub/victim2.txt (via the symlink),
+    // NOT the lexical sandbox/victim2.txt.
+    bool const ok_dd = libtrash::trash((sandbox / "inner_link" / ".." / "victim2.txt").string(), ec_dd);
+    CHECK(ok_dd && !ec_dd, "trashing via symlink+.. succeeds");
+    CHECK(!fs::exists(sandbox / "real_sub" / "victim2.txt"), "the intended (real_sub) file was trashed");
+    CHECK(fs::exists(sandbox / "victim2.txt"), "the lexical-collision decoy was NOT touched");
 
     // 4) Error paths and std::error_code interop.
     std::error_code ec4;
@@ -137,6 +181,34 @@ int main()
         threw = true;
     }
     CHECK(threw, "throwing overload throws filesystem_error on failure");
+
+    // 6) Security guard: the per-user top-dir trash must not follow a planted
+    //    symlink or reuse another user's directory (shared-mount hijack).
+    {
+        fs::path const guard_root = sandbox / "guard";
+        fs::create_directories(guard_root);
+        uid_t const me = ::getuid();
+
+        // (a) absent -> created as a private (0700) directory we own.
+        std::string const fresh = (guard_root / ".Trash-me").string();
+        CHECK(libtrash::detail::make_or_verify_owned_dir(fresh, me), "guard: creates a missing trash dir");
+        struct stat st = {};
+        CHECK(
+            ::lstat(fresh.c_str(), &st) == 0 && S_ISDIR(st.st_mode) && !S_ISLNK(st.st_mode),
+            "guard: created entry is a real directory");
+        CHECK((st.st_mode & 0777) == 0700, "guard: created dir is private (0700)");
+
+        // (b) idempotent on our own existing dir.
+        CHECK(libtrash::detail::make_or_verify_owned_dir(fresh, me), "guard: accepts our own existing dir");
+
+        // (c) a planted symlink is refused and NOT followed.
+        fs::path const attacker = guard_root / "attacker_target";
+        fs::create_directories(attacker);
+        std::string const planted = (guard_root / ".Trash-evil").string();
+        fs::create_symlink(attacker, planted);
+        CHECK(!libtrash::detail::make_or_verify_owned_dir(planted, me), "guard: refuses a planted symlink");
+        CHECK(fs::is_empty(attacker), "guard: nothing was written through the symlink");
+    }
 
     std::error_code rmec;
     fs::remove_all(sandbox, rmec);
